@@ -1,6 +1,6 @@
 name: 'RWCheck — Retraction Watch BibTeX Screener'
 description: >
-  Screen BibTeX reference files against the Retraction Watch database to catch retracted papers.
+  Check BibTeX reference files (.bib) against the Retraction Watch database to catch retracted papers.
 author: 'Aziz Khan'
 
 branding:
