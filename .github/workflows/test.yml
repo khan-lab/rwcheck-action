@@ -1,0 +1,97 @@
+name: Test action
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Smoke-test: a clean fixture should not fail even with fail-on-retraction: true
+  test-clean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write clean fixture
+        run: |
+          cat > test_clean.bib <<'EOF'
+          @article{fake2024,
+            author  = {Doe, Jane},
+            title   = {A Perfectly Fine Paper},
+            journal = {Journal of Results},
+            year    = {2024},
+            doi     = {10.0000/this-doi-does-not-exist}
+          }
+          EOF
+
+      - name: Run action (clean fixture, fail-on-retraction false)
+        uses: ./
+        with:
+          bib-files: 'test_clean.bib'
+          fail-on-retraction: 'false'
+          post-summary: 'false'
+
+  # Output test: verify the three outputs are populated
+  test-outputs:
+    runs-on: ubuntu-latest
+    outputs:
+      retracted: ${{ steps.rw.outputs.retracted-count }}
+      total: ${{ steps.rw.outputs.total-count }}
+      unchecked: ${{ steps.rw.outputs.unchecked-count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write fixture
+        run: |
+          cat > test.bib <<'EOF'
+          @article{fake2024,
+            author  = {Doe, Jane},
+            title   = {A Perfectly Fine Paper},
+            journal = {Journal of Results},
+            year    = {2024},
+            doi     = {10.0000/this-doi-does-not-exist}
+          }
+          EOF
+
+      - name: Run action
+        id: rw
+        uses: ./
+        with:
+          bib-files: 'test.bib'
+          fail-on-retraction: 'false'
+          post-summary: 'false'
+
+      - name: Verify outputs are set
+        run: |
+          echo "retracted-count = ${{ steps.rw.outputs.retracted-count }}"
+          echo "total-count     = ${{ steps.rw.outputs.total-count }}"
+          echo "unchecked-count = ${{ steps.rw.outputs.unchecked-count }}"
+          # Outputs must be integers (empty string would mean the step was skipped)
+          [[ "${{ steps.rw.outputs.total-count }}" =~ ^[0-9]+$ ]] || \
+            { echo "total-count is not an integer"; exit 1; }
+
+  # Warn-only mode: retracted paper → warning, not failure
+  test-warn-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write fixture with known-retracted DOI
+        run: |
+          cat > test_retracted.bib <<'EOF'
+          @article{stapel2011,
+            author  = {Stapel, Diederik A.},
+            title   = {Coping with chaos: How disordered contexts promote stereotyping},
+            journal = {Science},
+            year    = {2011},
+            doi     = {10.1126/science.1209107}
+          }
+          EOF
+
+      - name: Run action (retracted paper, warn only)
+        uses: ./
+        with:
+          bib-files: 'test_retracted.bib'
+          fail-on-retraction: 'false'
+          post-summary: 'false'

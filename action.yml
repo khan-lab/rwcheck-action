@@ -1,0 +1,166 @@
+name: 'RWCheck — Retraction Watch BibTeX Screener'
+description: >
+  Screen BibTeX reference files against the Retraction Watch database.
+  Fails the workflow (or warns) when retracted papers are found in your reference list.
+author: 'Aziz Khan'
+
+branding:
+  icon: 'alert-circle'
+  color: 'red'
+
+inputs:
+  bib-files:
+    description: >
+      Glob pattern for .bib files to check (relative to the repo root).
+      Defaults to all *.bib files found anywhere in the repository.
+    required: false
+    default: '**/*.bib'
+
+  fail-on-retraction:
+    description: >
+      Set to 'true' (default) to fail the workflow when retracted references
+      are found. Set to 'false' to report findings without failing.
+    required: false
+    default: 'true'
+
+  rwcheck-version:
+    description: >
+      Version of rwcheck to install. Defaults to the latest release.
+      Pin to a specific version for reproducibility (e.g. '1.1.0').
+    required: false
+    default: 'latest'
+
+  post-summary:
+    description: >
+      Set to 'true' (default) to write a Markdown summary to the GitHub
+      Actions job summary ($GITHUB_STEP_SUMMARY).
+    required: false
+    default: 'true'
+
+outputs:
+  retracted-count:
+    description: 'Total number of retracted references found across all checked .bib files.'
+    value: ${{ steps.check.outputs.retracted_count }}
+
+  total-count:
+    description: 'Total number of references checked across all .bib files.'
+    value: ${{ steps.check.outputs.total_count }}
+
+  unchecked-count:
+    description: 'References with no DOI or PMID that could not be verified.'
+    value: ${{ steps.check.outputs.unchecked_count }}
+
+runs:
+  using: 'composite'
+  steps:
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install rwcheck
+      shell: bash
+      run: |
+        if [ "${{ inputs.rwcheck-version }}" = "latest" ]; then
+          pip install --quiet rwcheck
+        else
+          pip install --quiet "rwcheck==${{ inputs.rwcheck-version }}"
+        fi
+
+    - name: Download Retraction Watch database
+      shell: bash
+      run: |
+        echo "::group::Downloading Retraction Watch database"
+        rwcheck update
+        echo "::endgroup::"
+
+    - name: Find .bib files
+      id: find-bibs
+      shell: bash
+      run: |
+        mapfile -t bib_files < <(find . -type f -name "*.bib" ! -path "*/.git/*" | sort)
+        if [ ${#bib_files[@]} -eq 0 ]; then
+          echo "No .bib files found — nothing to check."
+          echo "found=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "Found ${#bib_files[@]} .bib file(s):"
+          printf '  %s\n' "${bib_files[@]}"
+          echo "found=true" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "${bib_files[@]}" > /tmp/bib_file_list.txt
+        fi
+
+    - name: Check references
+      id: check
+      if: steps.find-bibs.outputs.found == 'true'
+      shell: bash
+      env:
+        HELPER: ${{ github.action_path }}/scripts/action_bib_table.py
+        FAIL_ON: ${{ inputs.fail-on-retraction }}
+        POST_SUMMARY: ${{ inputs.post-summary }}
+      run: |
+        total=0
+        retracted=0
+        unchecked=0
+        table_rows=""
+        report_dir="/tmp/rwcheck_reports"
+        mkdir -p "$report_dir"
+
+        while IFS= read -r bib; do
+          echo "::group::Checking $bib"
+          rwcheck batch-bib "$bib" --report-dir "$report_dir" || true
+          echo "::endgroup::"
+
+          stem=$(basename "$bib" .bib)
+          json_file="$report_dir/${stem}_rwcheck.json"
+          if [ ! -f "$json_file" ]; then
+            echo "No report for $bib — skipping."
+            continue
+          fi
+
+          while IFS=$'\t' read -r tag col1 col2 col3 col4 col5 col6; do
+            if [ "$tag" = "COUNTS" ]; then
+              total=$((total + col1))
+              retracted=$((retracted + col2))
+              unchecked=$((unchecked + col3))
+            elif [ "$tag" = "ROW" ]; then
+              table_rows="${table_rows}| \`${col1}\` | ${col2} | ${col3} | ${col4} | ${col5} | ${col6} |"$'\n'
+            fi
+          done < <(python3 "$HELPER" "$json_file")
+
+        done < /tmp/bib_file_list.txt
+
+        echo "retracted_count=$retracted" >> "$GITHUB_OUTPUT"
+        echo "total_count=$total"         >> "$GITHUB_OUTPUT"
+        echo "unchecked_count=$unchecked" >> "$GITHUB_OUTPUT"
+
+        if [ "$POST_SUMMARY" = "true" ]; then
+          {
+            printf "## RWCheck \xe2\x80\x94 Retraction Watch Screening\n\n"
+            printf "| Metric | Count |\n"
+            printf "|---|---|\n"
+            printf "| Total references checked | %s |\n" "$total"
+            printf "| **Retracted** | **%s** |\n" "$retracted"
+            printf "| Clean (not found) | %s |\n" "$((total - retracted - unchecked))"
+            printf "| Unchecked (no DOI/PMID) | %s |\n" "$unchecked"
+            if [ -n "$table_rows" ]; then
+              printf "\n### Retracted entries\n\n"
+              printf "| Key | Title | Nature | Date | Journal | Reason |\n"
+              printf "|---|---|---|---|---|---|\n"
+              printf "%s" "$table_rows"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+        fi
+
+        if [ "$retracted" -gt "0" ]; then
+          echo ""
+          echo "Warning: $retracted retracted reference(s) found in $total references checked."
+          if [ "$FAIL_ON" = "true" ]; then
+            echo "::error::$retracted retracted reference(s) detected. Review the job summary for details."
+            exit 1
+          else
+            echo "::warning::$retracted retracted reference(s) detected. Review the job summary for details."
+          fi
+        else
+          echo "All clear: no retracted references found in $total references checked."
+        fi
